@@ -20,6 +20,15 @@ class ToolRegistry
     /** @var array<class-string<PimTool>, PimTool> */
     protected array $tools = [];
 
+    protected array $decorators = [];
+
+    public function decorate(callable $decorator): void
+    {
+        // Wrappers can add receipts or tracing without replacing catalog tools.
+        // build() applies them only after the tool's normal authorization checks.
+        $this->decorators[] = $decorator;
+    }
+
     /** @var array<class-string<PimTool>, array{name: string, group: string, write: bool, permission: ?string, guidance: ?string}> */
     protected array $metadata = [];
 
@@ -170,7 +179,13 @@ class ToolRegistry
                 continue;
             }
 
-            $built[] = $tool->register($context);
+            $registered = $tool->register($context);
+            // Decorators receive this request's context; do not cache the resulting
+            // Tool between users. Wrappers must preserve the wrapped tool's checks.
+            foreach ($this->decorators as $decorator) {
+                $registered = $decorator($registered, $context, $this->metadata[$class]);
+            }
+            $built[] = $registered;
         }
 
         return $built;

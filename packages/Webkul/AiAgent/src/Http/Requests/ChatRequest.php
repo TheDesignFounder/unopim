@@ -41,8 +41,11 @@ class ChatRequest extends FormRequest
             }],
             'platform_id'     => ['nullable', 'integer'],
             'model'           => ['nullable', 'string', 'max:200'],
+            'extensions'      => ['nullable', 'array', 'max:10'],
+            'extensions.*'    => ['array'],
             'context'         => ['nullable', 'array'],
             'history'         => ['nullable', 'array'],
+            'request_id'      => ['nullable', 'uuid'],
             'conversation_id' => ['nullable', 'string', 'max:64', 'regex:/^[A-Za-z0-9_-]+$/'],
         ];
     }
@@ -81,6 +84,10 @@ class ChatRequest extends FormRequest
      */
     protected function prepareForValidation(): void
     {
+        if (is_string($this->input('extensions'))) {
+            abort_if(strlen($this->input('extensions')) > 16384, 422);
+            $this->merge(['extensions' => json_decode($this->input('extensions'), true)]);
+        }
         if (is_string($this->input('history'))) {
             $this->merge(['history' => json_decode($this->input('history'), true) ?: []]);
         }

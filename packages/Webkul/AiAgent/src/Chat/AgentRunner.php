@@ -627,10 +627,13 @@ MODE;
      */
     protected function flagMutation(ToolResult $toolResult, mixed $payload, array &$result): void
     {
+        // A write-capable tool may only queue a preview. Its explicit mutated:false
+        // prevents a product-page reload before the user chooses to apply anything.
         if ($toolResult->failed
             || $toolResult->denied
             || ! is_array($payload)
             || isset($payload['error'])
+            || ($payload['mutated'] ?? null) === false
             || ! ($this->toolRegistry->metadata($toolResult->name)['write'] ?? false)) {
             return;
         }
@@ -659,6 +662,10 @@ MODE;
     {
         if (! is_array($payload)) {
             return;
+        }
+
+        if ($descriptor = app(ResultRendererRegistry::class)->descriptor($payload['presentation'] ?? null)) {
+            $result['presentation'] = $descriptor;
         }
 
         if (! empty($payload['product_url'])) {

@@ -7,7 +7,9 @@
     $magicAiModel    = trim(explode(',', $magicAiModels)[0]) ?: ucfirst($magicAiPlatform);
 
     $platformRepo    = app(\Webkul\MagicAI\Repository\MagicAIPlatformRepository::class);
-    $aiPlatforms     = $platformRepo->getActivePlatformOptions();
+    $extensionRegistry = app(\Webkul\AiAgent\Chat\ExtensionRegistry::class);
+    $aiPlatforms = array_merge($extensionRegistry->options(), $platformRepo->getActivePlatformOptions());
+    $magicAiEnabled = $magicAiEnabled || count($extensionRegistry->options()) > 0;
     $defaultPlatform = collect($aiPlatforms)->firstWhere('is_default', true);
     $defaultPlatformId = $defaultPlatform['id'] ?? ($aiPlatforms[0]['id'] ?? null);
 
@@ -37,6 +39,14 @@
     });
 })();
 </script>
+
+@foreach($extensionRegistry->composers() as $composer)
+    @include($composer['view'])
+@endforeach
+
+@foreach(app(\Webkul\AiAgent\Chat\ResultRendererRegistry::class)->views() as $rendererView)
+    @include($rendererView)
+@endforeach
 
 @pushOnce('scripts')
 <script type="text/x-template" id="v-agenting-pim-template">
@@ -269,8 +279,10 @@
                                         <div class="text-[13px] text-gray-700 dark:text-gray-300 leading-[1.75] ap-ai-response" v-html="renderMarkdown(renderContent(msg, idx))"></div>
                                     </div>
 
+                                    <component v-if="resultComponent(msg.presentation)" :is="resultComponent(msg.presentation)"
+                                        :descriptor="msg.presentation" :visible="isOpen && activeTab === 'chat'" style="margin-top:16px"></component>
                                     {{-- Result details card --}}
-                                    <div v-if="msg.result && Object.keys(msg.result).length" class="rounded-xl border border-primary-200 dark:border-cherry-700 overflow-hidden">
+                                    <div v-if="!resultComponent(msg.presentation) && msg.result && Object.keys(msg.result).length" class="rounded-xl border border-primary-200 dark:border-cherry-700 overflow-hidden">
                                         <div class="px-4 py-2 border-b border-primary-100 dark:border-cherry-700" style="background:linear-gradient(135deg,rgb(var(--c-primary-50)),rgb(var(--c-primary-100)));">
                                             <p class="text-[10px] font-bold text-primary-500 dark:text-primary-400 uppercase tracking-wider" v-text="trans.result"></p>
                                         </div>
@@ -385,23 +397,32 @@
                         </div>
                     </div>
 
+                    @foreach($extensionRegistry->composers() as $composer)
+                    <{{ $composer['component'] }} :value="extensionContext['{{ $composer['key'] }}'] || {}" :conversation-id="activeSessionId" :draft="inputText" :cursor="composerCursor" :disabled="isLoading" :ref="el => composerRefs['{{ $composer['key'] }}'] = el" @replace-draft="replaceComposerDraft" @change="extensionContext['{{ $composer['key'] }}'] = $event"></{{ $composer['component'] }}>
+                    @endforeach
                     {{-- Input — always-visible bordered box --}}
                     <div class="ap-input-wrap">
 
                         {{-- Outer bordered container --}}
                         <div class="ap-input-box">
 
-                            {{-- Textarea --}}
+                            <div class="ap-composer-editor">
+                            <div v-if="composerHasReferences" ref="composerHighlight" class="ap-composer-highlight" aria-hidden="true"><template v-for="(part, i) in composerSegments" :key="i"><span :class="{'ap-composer-reference': part.reference}" v-text="part.text"></span></template></div>
+                            {{-- Native textarea retains editing, selection, paste, undo and IME. --}}
                             <textarea
                                 ref="textInput"
                                 v-model="inputText"
-                                @keydown.enter.exact.prevent="send"
                                 rows="3"
                                 class="ap-input-textarea"
                                 :placeholder="inputPlaceholder"
                                 :disabled="isLoading"
-                                @input="autoResize"
+                                @input="composerInput"
+                                @click="composerSelection" @keyup="composerSelection" @select="composerSelection"
+                                @scroll="syncComposerScroll"
+                                :style="composerHasReferences ? {color: 'transparent', caretColor: 'var(--ap-caret, #7c3aed)'} : {}"
+                                @keydown="onComposerKey"
                             ></textarea>
+                            </div>
 
                             {{-- Toolbar row: Attach + Platform/Model + Send --}}
                             <div class="ap-input-toolbar">
@@ -426,12 +447,14 @@
                                             v-model="selectedPlatformId"
                                             @change="onPlatformChange"
                                             class="ap-input-select"
+                                            :style="hideSingleModelSelector ? {maxWidth: 'calc(100% - 34px)'} : null"
                                             :title="trans.selectPlatform"
                                             :aria-label="trans.selectPlatform"
                                         >
                                             <option v-for="p in platforms" :key="p.id" :value="p.id" v-text="p.label"></option>
                                         </select>
                                         <select
+                                            v-if="!hideSingleModelSelector"
                                             v-model="selectedModel"
                                             class="ap-input-select"
                                             :title="trans.selectModel"
@@ -479,6 +502,8 @@
 </script>
 
 <style>
+.ap-composer-editor{position:relative}.ap-composer-highlight{position:absolute;inset:0;pointer-events:none;white-space:pre-wrap;overflow-wrap:break-word;overflow:hidden;font-family:inherit;font-size:13px;line-height:1.55;padding:12px 14px 6px;color:#374151;border:0}.dark .ap-composer-highlight{color:#f3f4f6}.ap-composer-reference{color:#2563eb}.dark .ap-composer-reference{color:#93c5fd}
+
 :root { --ap-panel-size: 420px; --ap-panel-width: 0px; }
 
 /* Docked width: the panel pushes the app aside instead of covering it. Zero on
@@ -859,6 +884,15 @@ const pickTextModel = (models) => {
     return models[0];
 };
 
+// getRandomValues also works on self-hosted HTTP origins where randomUUID is unavailable.
+const chatRequestId = () => {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+};
+
 app.component('v-agenting-pim', {
     template: '#v-agenting-pim-template',
 
@@ -967,6 +1001,8 @@ app.component('v-agenting-pim', {
             activeCapability: null,
             messages: [],
             inputText: '',
+            composerCursor: 0,
+            composerRefs: {},
             pendingFiles: [],
             isLoading: false,
             streamingStatus: '',
@@ -974,6 +1010,7 @@ app.component('v-agenting-pim', {
             productContext: null,
             noTransition: false,
             capabilitySearch: '',
+            extensionContext: {},
             // Session management
             sessions: [],
             activeSessionId: null,
@@ -1093,6 +1130,28 @@ app.component('v-agenting-pim', {
     },
 
     computed: {
+        composerSegments() {
+            // Highlight full labels, longest first, so a name with spaces or a
+            // shared prefix is one reference. The template renders text, not HTML.
+            const references = [...new Set(
+                Object.values(this.extensionContext)
+                    .flatMap(v => Array.isArray(v?.references) ? v.references : [])
+                    .filter(x => typeof x === 'string' && Array.from(x).length <= 255)
+            )].sort((a, b) => b.length - a.length);
+            if (!references.length) return [{text: this.inputText, reference: false}];
+            const escaped = references.map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+            const pattern = new RegExp('(?<![\\p{L}\\p{N}_])(?:'+escaped.join('|')+')(?![\\p{L}\\p{N}_-])', 'gu');
+            const parts = [];
+            let offset = 0;
+            for (const match of this.inputText.matchAll(pattern)) {
+                parts.push({text: this.inputText.slice(offset, match.index), reference: false}, {text: match[0], reference: true});
+                offset = match.index + match[0].length;
+            }
+            parts.push({text: this.inputText.slice(offset), reference: false});
+            return parts;
+        },
+        composerHasReferences() { return this.composerSegments.some(x => x.reference); },
+
         filteredCapabilities() {
             if (!this.capabilitySearch.trim()) return this.capabilities;
             const q = this.capabilitySearch.toLowerCase();
@@ -1106,6 +1165,12 @@ app.component('v-agenting-pim', {
             const platform = this.platforms.find(p => p.id === this.selectedPlatformId);
             return platform ? (platform.models || []) : [];
         },
+        hideSingleModelSelector() {
+            // This is a presentation hint from installed code. Keep the selected
+            // model in the request even when its redundant selector is hidden.
+            const platform = this.platforms.find(p => p.id === this.selectedPlatformId);
+            return platform?.hide_single_model === true && this.availableModels.length === 1;
+        },
         fileAccept() {
             if (this.activeCapability?.acceptsSpreadsheet) return '.csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel';
             return 'image/jpeg,image/png,image/webp,image/gif';
@@ -1118,6 +1183,14 @@ app.component('v-agenting-pim', {
     },
 
     mounted() {
+        const overrides = @json($extensionRegistry->capabilities());
+        this.capabilities = this.capabilities.map(c => ({...c, ...(overrides[c.key] || {})}));
+        this._composeListener = (event) => {
+            this.isOpen = true; this.activeTab = 'chat';
+            if (typeof event.detail?.text === 'string') this.inputText = event.detail.text;
+            this.$nextTick(() => this.$refs.textInput?.focus());
+        };
+        window.addEventListener('ai-agent:compose', this._composeListener);
         this.$nextTick(() => this.observeMessages());
         this.loadSessions();
         this.detectProductContext();
@@ -1165,7 +1238,55 @@ app.component('v-agenting-pim', {
         activeCapability: { deep: true, handler() { this.saveState(); } },
     },
 
+    beforeUnmount() { window.removeEventListener('ai-agent:compose', this._composeListener); },
     methods: {
+        composerSelection() {
+            this.composerCursor = this.$refs.textInput?.selectionStart ?? this.inputText.length;
+        },
+        composerInput() {
+            this.composerSelection();
+            this.autoResize();
+        },
+        syncComposerScroll() {
+            // The native textarea owns editing/selection; the overlay only colors
+            // references and must track both scroll axes to stay aligned.
+            const input = this.$refs.textInput, layer = this.$refs.composerHighlight;
+            if (input && layer) {
+                layer.scrollTop = input.scrollTop;
+                layer.scrollLeft = input.scrollLeft;
+            }
+        },
+        replaceComposerDraft(change) {
+            if (this.isLoading || !change || typeof change.text !== 'string') return;
+            const {start, end, text} = change;
+            if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > this.inputText.length || text.length > 10000) return;
+            this.inputText = this.inputText.slice(0, start) + text + this.inputText.slice(end);
+            this.composerCursor = start + text.length;
+            this.$nextTick(() => {
+                const input = this.$refs.textInput;
+                input?.focus();
+                input?.setSelectionRange(this.composerCursor, this.composerCursor);
+                this.autoResize();
+            });
+        },
+        onComposerKey(event) {
+            // Let IME composition finish, then let an open picker consume keys
+            // before the normal Enter-to-send shortcut handles the event.
+            if (event.isComposing) return;
+            for (const composer of Object.values(this.composerRefs)) {
+                if (composer?.handleKey?.(event)) return;
+            }
+            if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+                event.preventDefault();
+                this.send();
+            }
+        },
+        resultComponent(descriptor) {
+            // A saved descriptor can select only a server-registered component.
+            // Unknown types fall back without evaluating a supplied template.
+            const installed = @json(app(\Webkul\AiAgent\Chat\ResultRendererRegistry::class)->components());
+            return descriptor && Object.prototype.hasOwnProperty.call(installed, descriptor.type) ? installed[descriptor.type] : null;
+        },
         detectProductContext() {
             const match = window.location.pathname.match(/\/catalog\/products\/edit\/(\d+)/);
             if (match) {
@@ -1220,7 +1341,7 @@ app.component('v-agenting-pim', {
 
         createNewSession() {
             if (this.messages.length > 0) {
-                // Save current session to localStorage only (not DB — avoids duplicates)
+                // Save before changing identity; the server merges by conversation/message ID.
                 this.saveCurrentSession();
             }
             this.activeSessionId = this.generateSessionId();
@@ -1233,7 +1354,7 @@ app.component('v-agenting-pim', {
             this.$nextTick(() => this.$refs.textInput?.focus());
         },
 
-        saveCurrentSession(persistToDb = false) {
+        saveCurrentSession(persistToDb = true) {
             if (!this.activeSessionId || this.messages.length === 0) return;
 
             const firstUserMsg = this.messages.find(m => m.role === 'user');
@@ -1241,11 +1362,18 @@ app.component('v-agenting-pim', {
                 ? firstUserMsg.content.substring(0, 50) + (firstUserMsg.content.length > 50 ? '…' : '')
                 : this.trans.sessionDefaultName;
 
-            // Limit stored messages to prevent excessive localStorage usage.
-            const recentMessages = this.messages.filter(m => !m.isRedirect).slice(-50);
+            // Build the full transcript for server persistence. Only the browser
+            // cache below is capped at 50 messages; it must not truncate DB history.
+            const recentMessages = this.messages.filter(m => !m.isRedirect);
             const sessionMessages = recentMessages.map(m => ({
                 role: m.role,
+                message_id: m.message_id || null,
+                request_id: m.request_id || null,
+                presentation: m.presentation || null,
+                tool_calls: m.tool_calls || null,
+                tokens_used: m.tokens_used || 0,
                 content: m.content || '',
+                action: m.action || null,
                 result: m.result || null,
                 product_url: m.product_url || null,
                 download_url: m.download_url || null,
@@ -1258,7 +1386,8 @@ app.component('v-agenting-pim', {
                 name: name,
                 messageCount: this.messages.filter(m => m.role === 'user').length,
                 lastActive: new Date().toLocaleDateString(),
-                messages: sessionMessages,
+                dbId: this.sessions[existingIdx]?.dbId || null,
+                messages: sessionMessages.slice(-50),
                 capability: this.activeCapability?.key || null,
             };
 
@@ -1273,9 +1402,72 @@ app.component('v-agenting-pim', {
             }
 
             this.persistSessions();
+            if (persistToDb && !this.messages.some(m => m.isStreaming)) {
+                const payload = {conversation_id: String(sessionData.id), title: name,
+                    messages: sessionMessages.map(m => ({role:m.role, content:m.content, message_id:m.message_id, request_id:m.request_id, presentation:m.presentation, tool_calls:m.tool_calls, tokens_used:m.tokens_used, result:m.result, product_url:m.product_url, download_url:m.download_url, _confirmed:m._confirmed, action:m.action}))};
+                const serialized = JSON.stringify(payload);
+                this._historyFingerprints ||= {};
+                if (this._historyFingerprints[sessionData.id] === serialized) return;
+                this._historyFingerprints[sessionData.id] = serialized;
+                // Serialize this tab's saves. The server also merges additively
+                // because other tabs and delayed requests can still arrive out of order.
+                this._historySave = (this._historySave || Promise.resolve()).catch(() => {}).then(() =>
+                    this.saveHistoryBatches(payload)
+                ).then(res => {
+                    const local = this.sessions.find(s => s.id === sessionData.id);
+                    if (local) local.dbId = res.data.id;
+                    this.persistSessions();
+                }).catch(() => { delete this._historyFingerprints[sessionData.id]; });
+            }
+            return this._historySave;
+        },
+
+        async saveHistoryBatches(payload) {
+            let response;
+            for (let offset = 0; offset < payload.messages.length; offset += 100) {
+                response = await this.$axios.post("{{ route('ai-agent.conversations.store') }}", {...payload, messages:payload.messages.slice(offset, offset + 100)});
+            }
+            return response;
+        },
+
+        historyLink(value, product = false) {
+            if (typeof value !== 'string' || value.length > 8192 || /[\x00-\x20\x7f\\]/.test(value)) return null;
+            try {
+                const decoded = decodeURIComponent(value);
+                if (/^[\/]{2}|[\x00-\x1f\x7f\\]/.test(decoded)) return null;
+                if (!value.startsWith('/') && !/^https?:\/\//.test(value)) return null;
+                const link = new URL(value, window.location.origin);
+                if (!['http:', 'https:'].includes(link.protocol) || link.username || link.password || (product && link.origin !== window.location.origin)) return null;
+                return value;
+            } catch { return null; }
+        },
+
+        mergeHistory(incoming, local = []) {
+            // Saved fields win, but retain unsaved local messages and fill display
+            // fields absent from older rows. Confirmation may only advance to true.
+            const remaining = new Set(local);
+            const merged = incoming.map(remote => {
+                const cached = local.find(m => m.message_id && m.message_id === remote.message_id)
+                    || local.find(m => !m.message_id && remaining.has(m) && m.role === remote.role && m.content === remote.content) || {};
+                remaining.delete(cached);
+                const message = {...cached, ...remote};
+                for (const field of ['result', 'product_url', 'download_url', 'action']) {
+                    if (remote[field] == null && cached[field] != null) message[field] = cached[field];
+                }
+                message._confirmed = Boolean(remote._confirmed || cached._confirmed);
+                if (typeof message.tool_calls === 'string') {
+                    try { message.tool_calls = JSON.parse(message.tool_calls); } catch { message.tool_calls = null; }
+                }
+                message.product_url = this.historyLink(message.product_url, true);
+                message.download_url = this.historyLink(message.download_url);
+                return message;
+            });
+            return [...merged, ...[...remaining].map(message => ({...message, product_url:this.historyLink(message.product_url, true), download_url:this.historyLink(message.download_url)}))];
         },
 
         async switchToSession(sessionId) {
+            // Ignore a slow history response if the user selected another session.
+            const selection = this._historySelection = (this._historySelection || 0) + 1;
             if (this.messages.length > 0 && this.activeSessionId) {
                 await this.saveCurrentSession();
             }
@@ -1284,15 +1476,18 @@ app.component('v-agenting-pim', {
             let session = this.sessions.find(s => s.id === sessionId);
 
             // If it's a DB-backed session (numeric ID), load from API
-            if (!session && typeof sessionId === 'number') {
+            if (session?.dbId || typeof sessionId === 'number') {
                 try {
-                    const res = await this.$axios.get("{{ url(config('app.admin_url') . '/ai-agent/conversations') }}/" + sessionId);
+                    const res = await this.$axios.get("{{ url(config('app.admin_url') . '/ai-agent/conversations') }}/" + (session?.dbId || sessionId));
+                    if (selection !== this._historySelection) return;
                     const data = res.data;
+                    const localMessages = this.activeSessionId === sessionId ? this.messages : session?.messages || [];
                     session = {
-                        id: data.conversation.id,
+                        id: data.conversation.client_id || data.conversation.id,
+                        dbId: data.conversation.id,
                         name: data.conversation.title,
-                        messages: data.messages.map(m => ({ role: m.role, content: m.content })),
-                        capability: null,
+                        messages: this.mergeHistory(data.messages, localMessages),
+                        capability: session?.capability || null,
                     };
                 } catch (e) { return; }
             }
@@ -1316,9 +1511,10 @@ app.component('v-agenting-pim', {
         },
 
         async deleteSession(sessionId) {
-            if (typeof sessionId === 'number') {
+            const dbId = this.sessions.find(s => s.id === sessionId)?.dbId || (typeof sessionId === 'number' ? sessionId : null);
+            if (dbId) {
                 try {
-                    await this.$axios.delete("{{ url(config('app.admin_url') . '/ai-agent/conversations') }}/" + sessionId);
+                    await this.$axios.delete("{{ url(config('app.admin_url') . '/ai-agent/conversations') }}/" + dbId);
                 } catch (e) {
                     this.$emitter.emit('add-flash', { type: 'error', message: this.trans.errorGeneric });
 
@@ -1350,6 +1546,21 @@ app.component('v-agenting-pim', {
                     });
                 }
             } catch (e) { this.sessions = []; }
+            this.$axios.get("{{ route('ai-agent.conversations.index') }}").then(async res => {
+                for (const item of res.data.conversations || []) {
+                    const id = item.client_id || item.id;
+                    const existing = this.sessions.find(s => s.id === id);
+                    if (existing) existing.dbId = item.id;
+                    else this.sessions.push({id, dbId:item.id, name:item.title, messageCount:'',lastActive:new Date(item.updated_at).toLocaleDateString()});
+                }
+                const activeId = this.activeSessionId;
+                const saved = this.sessions.find(s => s.id === activeId);
+                if (saved?.dbId) {
+                    const response = await this.$axios.get("{{ url(config('app.admin_url') . '/ai-agent/conversations') }}/" + saved.dbId);
+                    if (this.activeSessionId !== activeId || this.messages.some(m => m.isStreaming)) return;
+                    this.messages = this.mergeHistory(response.data.messages, this.messages);
+                }
+            }).catch(() => {});
         },
         onPlatformChange() {
             this.selectedModel = pickTextModel(this.availableModels);
@@ -1361,6 +1572,7 @@ app.component('v-agenting-pim', {
             }
 
             this.activeCapability = cap;
+            if (cap.extension_event) { window.dispatchEvent(new CustomEvent(cap.extension_event)); }
             this.activeTab = 'chat';
 
             // Auto-populate the prompt text if the capability has one
@@ -1446,13 +1658,25 @@ app.component('v-agenting-pim', {
             return true;
         },
 
-        async send() {
+        consumeExtensionContext(data) {
+            // A text reply may only be asking for clarification. Consume selections
+            // after a matching registered result, not simply after a successful send.
+            const consumers = @json(app(\Webkul\AiAgent\Chat\ResultRendererRegistry::class)->contextConsumers());
+            const key = consumers[data?.presentation?.type];
+            if (key) delete this.extensionContext[key];
+        },
+
+        async send(retryRequestId = null) {
             const text = this.inputText.trim();
             const files = [...this.pendingFiles];
+            // Snapshot the selection before clearing the draft; later picker edits
+            // must not change the inputs of this request or its retry.
+            const selectedContext = JSON.parse(JSON.stringify(this.extensionContext));
             if (!text && files.length === 0) return;
 
-            // Build user message for display
-            const userMsg = { role: 'user', content: text || (files.length ? '📎 ' + files.map(f => f.name).join(', ') : ''), files: files.map(f => ({ type: f.type, preview: f.preview, name: f.name })) };
+            // message_id identifies a transcript entry; request_id identifies the
+            // operation. A retry gets a new entry but reuses its operation identity.
+            const userMsg = { message_id: chatRequestId(), request_id: typeof retryRequestId === 'string' ? retryRequestId : chatRequestId(), role: 'user', extensions: selectedContext, content: text || (files.length ? '📎 ' + files.map(f => f.name).join(', ') : ''), files: files.map(f => ({ type: f.type, preview: f.preview, name: f.name })) };
             this.messages.push(userMsg);
             this.inputText = ''; this.resetTextarea(); this.scrollBottom(true); this.isLoading = true;
             this.streamingStatus = files.length > 0 ? this.trans.analyzingFiles : this.trans.thinking;
@@ -1465,6 +1689,8 @@ app.component('v-agenting-pim', {
                 if (this.selectedModel) fd.append('model', this.selectedModel);
                 files.forEach((f, i) => { if (f.type === 'image') fd.append('images[' + i + ']', f.file); else fd.append('files[' + i + ']', f.file); });
                 fd.append('conversation_id', this.activeSessionId);
+                fd.append('request_id', userMsg.request_id);
+                fd.append('extensions', JSON.stringify(selectedContext));
                 fd.append('history', JSON.stringify(this.messages.slice(0, -1).map(m => ({ role: m.role, content: m.content || '' }))));
                 fd.append('context[current_page]', window.location.pathname);
                 if (this.productContext) {
@@ -1472,7 +1698,8 @@ app.component('v-agenting-pim', {
                     if (this.productContext.sku) fd.append('context[product_sku]', this.productContext.sku);
                     if (this.productContext.name) fd.append('context[product_name]', this.productContext.name);
                 }
-                // Try SSE streaming first, fallback to blocking JSON endpoint
+                // Both transports reuse this FormData and request_id. Extensions
+                // must deduplicate their effects; an ID alone is not an execution lock.
                 let data = null;
                 try {
                     const streamRes = await fetch("{{ route('ai-agent.chat.stream') }}", {
@@ -1490,7 +1717,8 @@ app.component('v-agenting-pim', {
 
                     if (streamRes.ok && ct.includes('text/event-stream')) {
                         // SSE streaming works — process the stream
-                        await this.processStream(streamRes, files);
+                        const completed = await this.processStream(streamRes, files);
+                        this.consumeExtensionContext(completed);
                         return; // processStream handles everything
                     } else if (streamRes.ok && ct.includes('application/json')) {
                         data = await streamRes.json();
@@ -1505,8 +1733,9 @@ app.component('v-agenting-pim', {
                 }
 
                 // Handle JSON response (from either stream JSON or blocking fallback)
+                this.consumeExtensionContext(data);
                 this.pendingFiles = [];
-                this.messages.push({ role: 'assistant', content: data.reply || this.trans.noResponse, action: data.action || null, result: data.result || null, product_url: data.product_url || null, download_url: data.download_url || null });
+                this.messages.push({ message_id: chatRequestId(), presentation: data.presentation || null, role: 'assistant', content: data.reply || this.trans.noResponse, action: data.action || null, result: data.result || null, product_url: data.product_url || null, download_url: data.download_url || null });
 
                 // Auto-navigate to the created product page
                 if (data.product_url && this.activeCapability?.key === 'create_from_image') {
@@ -1543,6 +1772,9 @@ app.component('v-agenting-pim', {
             const msgIndex = this.messages.length;
             this.messages.push({ role: 'assistant', content: '', isStreaming: true });
 
+            // An event line and its data may arrive in different network chunks.
+            // Preserve the event name until its data line has been consumed.
+            let currentEvent = null;
             try {
                 while (true) {
                     const { done, value } = await reader.read();
@@ -1552,7 +1784,6 @@ app.component('v-agenting-pim', {
                     const lines = buffer.split('\n');
                     buffer = lines.pop() || '';
 
-                    let currentEvent = null;
                     for (const line of lines) {
                         if (line.startsWith('event: ')) {
                             currentEvent = line.substring(7).trim();
@@ -1600,6 +1831,8 @@ app.component('v-agenting-pim', {
                 content: streamedText || this.trans.noResponse,
                 action: resultData.action || 'agent_response',
                 result: resultData.result || null,
+                message_id: chatRequestId(),
+                presentation: resultData.presentation || null,
                 product_url: resultData.product_url || null,
                 download_url: resultData.download_url || null,
                 isStreaming: false,
@@ -1615,6 +1848,7 @@ app.component('v-agenting-pim', {
                 this.streamingStatus = this.trans.refreshingPage;
                 setTimeout(() => { window.location.reload(); }, 1500);
             }
+            return resultData;
         },
 
         copyMessage(idx) {
@@ -1647,11 +1881,13 @@ app.component('v-agenting-pim', {
             let userIdx = idx - 1;
             while (userIdx >= 0 && this.messages[userIdx].role !== 'user') { userIdx--; }
             if (userIdx < 0) return;
+            const requestId = this.messages[userIdx].request_id || chatRequestId();
+            this.extensionContext = this.messages[userIdx].extensions || {};
             const userText = this.messages[userIdx].content || '';
             // Remove from that user message onwards and resend
             this.messages.splice(userIdx);
             this.inputText = userText;
-            this.$nextTick(() => this.send());
+            this.$nextTick(() => this.send(requestId));
         },
 
         rateMessage(idx, rating) {
@@ -1921,7 +2157,7 @@ app.component('v-agenting-pim', {
                     selectedPlatformId: this.selectedPlatformId,
                     selectedModel: this.selectedModel,
                     activeSessionId: this.activeSessionId,
-                    messages: this.messages.filter(m => !m.isRedirect).map(m => ({ role: m.role, content: m.content, result: m.result || null, product_url: m.product_url || null, download_url: m.download_url || null, _confirmed: m._confirmed || false })),
+                    messages: this.messages.filter(m => !m.isRedirect).map(m => ({ message_id: m.message_id || null, request_id: m.request_id || null, presentation: m.presentation || null, role: m.role, content: m.content, action: m.action || null, result: m.result || null, product_url: m.product_url || null, download_url: m.download_url || null, _confirmed: m._confirmed || false })),
                 }));
 
                 // Auto-save current session to localStorage
