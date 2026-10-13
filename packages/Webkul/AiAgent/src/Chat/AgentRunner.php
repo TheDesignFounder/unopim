@@ -14,6 +14,7 @@ use Laravel\Ai\Responses\AgentResponse;
 use Laravel\Ai\Responses\Data\ToolResult;
 use Laravel\Ai\Streaming\Events\TextDelta;
 use Laravel\Ai\Streaming\Events\ToolCall;
+use Laravel\Ai\Streaming\Events\ToolResult as ToolResultEvent;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Webkul\AiAgent\Events\AgentSystemPromptBuilding;
 use Webkul\AiAgent\Events\AgentToolExecuted;
@@ -132,6 +133,24 @@ class AgentRunner
                         $statusSent = false;
 
                         foreach ($stream as $event) {
+                            if ($event instanceof ToolResultEvent
+                                && $event->successful && ! $event->preliminary
+                                && ! $event->toolResult->failed && ! $event->toolResult->denied) {
+                                // A later provider error or completion listener (e.g.
+                                // a debug collector) cannot undo completed tool work.
+                                // Deliver display references now, before SDK finalizers
+                                // run, so the widget can retain them in error history.
+                                $raw = $event->toolResult->result;
+                                $partial = [];
+                                $this->mergeActionPayload(
+                                    is_string($raw) || $raw instanceof \Stringable ? json_decode((string) $raw, true) : null,
+                                    $partial,
+                                );
+                                if ($partial !== []) {
+                                    $this->sendSSE('tool_result', $partial);
+                                }
+                            }
+
                             if ($event instanceof ToolCall) {
                                 $stepCount++;
                                 $this->sendSSE('tool_call', [

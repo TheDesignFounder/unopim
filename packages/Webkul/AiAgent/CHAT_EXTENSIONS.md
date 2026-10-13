@@ -98,6 +98,14 @@ paths or HTTP(S), without URL credentials or protocol-relative targets. Saved
 data is for display, never a trusted tool instruction. Signed URLs are preserved,
 not renewed; old fields absent from both browser and database cannot be recovered.
 
+During streaming, a successful, final tool result emits a `tool_result` event
+with these display fields before the SDK runs completion listeners. The widget
+retains that result if a later provider call, completion listener, or connection
+fails, then includes it in the normal conversation save. The error remains
+visible; a failed stream does not automatically navigate or refresh the page.
+The final `complete` event still supplies the normal response metadata. This
+protects completed work without reporting the rest of a failed turn as successful.
+
 ### Persistence and backward compatibility
 
 An upsert finds or creates the current admin's conversation by client ID, then

@@ -1802,8 +1802,13 @@ app.component('v-agenting-pim', {
                                         this.messages[msgIndex].content = streamedText;
                                         this.scrollBottom();
                                         break;
+                                    case 'tool_result':
                                     case 'complete':
-                                        resultData = eventData;
+                                        // Completed work remains valid even if a later
+                                        // provider call or completion observer fails.
+                                        resultData = {...resultData, ...eventData};
+                                        this.messages[msgIndex].presentation = resultData.presentation || null;
+                                        this.messages[msgIndex].result = resultData.result || null;
                                         break;
                                     case 'error':
                                         streamFailed = true;
@@ -1839,11 +1844,11 @@ app.component('v-agenting-pim', {
             };
 
             // Auto-navigate/refresh handling
-            if (resultData.product_url && this.activeCapability?.key === 'create_from_image') {
+            if (!streamFailed && resultData.product_url && this.activeCapability?.key === 'create_from_image') {
                 this.messages.push({ role: 'assistant', content: this.trans.openingProduct, isRedirect: true });
                 this.saveState();
                 setTimeout(() => { window.location.href = resultData.product_url; }, 1500);
-            } else if (this.shouldAutoRefreshAfterAction(resultData)) {
+            } else if (!streamFailed && this.shouldAutoRefreshAfterAction(resultData)) {
                 this.saveState();
                 this.streamingStatus = this.trans.refreshingPage;
                 setTimeout(() => { window.location.reload(); }, 1500);
