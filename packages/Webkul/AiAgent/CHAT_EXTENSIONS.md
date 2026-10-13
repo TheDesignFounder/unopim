@@ -155,3 +155,148 @@ stale/concurrent history saves, retry receipts and asynchronous result recovery.
 Those tests belong with their package and are not implied by the widget suite.
 Automated checks do not replace browser checks of native chat, reopening history,
 switching providers and using the installed composer's keyboard controls.
+
+
+## Try the hooks without an external provider
+
+Provider registration itself is small, but reproducing composer insertion,
+custom rendering and server-backed history needs a composer and a deterministic
+reply as well. The two example files below form that complete local fixture.
+They require no external account or network call. They exercise the real widget,
+request/context validation and conversation storage; the agent runner is a stub,
+so this is not an LLM or tool-execution test.
+
+Use a disposable, installed UnoPIM checkout of this branch with `APP_ENV=local`.
+Run `php artisan migrate`, and enable the Agentic PIM chat interface in the host
+configuration. Do not install other chat extensions for this example.
+
+1. Create `app/Providers/ChatExampleServiceProvider.php` with the code below.
+2. Add `App\Providers\ChatExampleServiceProvider::class,` to the returned array
+   in `bootstrap/providers.php`.
+3. Create `resources/views/chat-example.blade.php` with the second block.
+4. Run `php artisan optimize:clear`, then open the native chat. Select
+   **Example provider** if it is not already selected.
+5. Type `Show details for ` and click **Insert Sample Sneaker**. The name is
+   inserted at the caret and highlighted. Only the provider selector is shown:
+   its sole model is still sent, and the stub rejects a different model.
+6. Send the message. The registered result card appears. Wait for the conversation
+   save to finish, then reload: the result remains.
+7. For a stronger persistence check, clear this site's local/session storage
+   while retaining the login cookie, reload, open **Sessions**, and reopen the
+   saved conversation. The card is restored from server history.
+
+The following captures use this example on a fresh `3.x` installation. Browser
+checks assert that the hidden `example-only` model is submitted and that the
+reopened conversation loads its descriptor from the server after browser storage
+is cleared. This exercises the widget and persistence routes, not an external
+model or its tool loop.
+
+| Name insertion; only the provider selector is visible | Registered result card | Same result restored after reload |
+| --- | --- | --- |
+| ![Name inserted in the composer](docs/chat-extension-example/01-composer.png) | ![Example result card](docs/chat-extension-example/02-result.png) | ![Saved result after reload](docs/chat-extension-example/03-reloaded-history.png) |
+
+All labels and result data are synthetic. The example renderer has no resource
+endpoint. A real renderer must authorize every resource request; a descriptor
+alone grants no access. Remove the two fixture files and the provider entry,
+then clear caches after testing. The runner override affects every chat request
+in this local fixture, so do not use it in a shared or production installation.
+
+```php
+<?php
+
+namespace App\Providers;
+
+use Illuminate\Support\ServiceProvider;
+use Symfony\Component\HttpFoundation\StreamedResponse;
+use Webkul\AiAgent\Chat\AgentRunner;
+use Webkul\AiAgent\Chat\ChatContext;
+use Webkul\AiAgent\Chat\ExtensionRegistry;
+use Webkul\AiAgent\Chat\ResultRendererRegistry;
+use Webkul\MagicAI\Models\MagicAIPlatform;
+
+/** Local, deterministic example. No remote provider is contacted. */
+class ChatExampleServiceProvider extends ServiceProvider
+{
+    public function boot(): void
+    {
+        if (! $this->app->environment('local')) {
+            return;
+        }
+
+        $registry = $this->app->make(ExtensionRegistry::class);
+        $registry->provider(-99, fn () => new MagicAIPlatform([
+            'label' => 'Example provider', 'provider' => 'openai',
+            'models' => 'example-only', 'status' => true,
+        ]), [
+            'label' => 'Example provider', 'models' => ['example-only'],
+            'is_default' => true, 'hide_single_model' => true,
+        ]);
+        $registry->composer('example', 'v-example-composer', 'chat-example');
+        $this->app->make(ResultRendererRegistry::class)->register(
+            'example.lookup', 'v-example-result', 'chat-example', 'example',
+        );
+
+        // A deterministic stand-in isolates the hooks from provider credentials
+        // and network behavior. Use this only in a disposable local installation.
+        $this->app->bind(AgentRunner::class, fn () => new class extends AgentRunner
+        {
+            public function __construct() {}
+
+            public function run(ChatContext $context): array
+            {
+                abort_unless($context->model === 'example-only', 422);
+
+                return [
+                    'reply' => 'Example lookup complete for Sample Sneaker.',
+                    'action' => 'agent_response',
+                    'presentation' => ['type' => 'example.lookup', 'id' => 'sample-sneaker'],
+                    'result' => ['name' => 'Sample Sneaker', 'status' => 'Example complete'],
+                ];
+            }
+
+            public function runStreaming(ChatContext $context): StreamedResponse
+            {
+                $result = $this->run($context);
+
+                return new StreamedResponse(static function () use ($result): void {
+                    echo 'event: text_delta'."\n".'data: '.json_encode(['chunk' => $result['reply']])."\n\n";
+                    echo 'event: complete'."\n".'data: '.json_encode($result)."\n\n";
+                }, 200, ['Content-Type' => 'text/event-stream']);
+            }
+        });
+    }
+}
+```
+
+```blade
+@pushOnce('scripts', 'chat-example')
+<script type="text/x-template" id="example-composer">
+    <button type="button" class="secondary-button" @click="insert">Insert Sample Sneaker</button>
+</script>
+<script type="text/x-template" id="example-result">
+    <section v-if="descriptor.id === 'sample-sneaker'" style="padding:20px;border:1px solid #a78bfa;border-radius:12px">
+        <strong>Example lookup complete</strong>
+        <p style="margin-top:12px">Sample Sneaker</p>
+        <p style="margin-top:8px">Synthetic example result saved with this conversation.</p>
+    </section>
+</script>
+<script type="module">
+app.component('v-example-composer', {
+    template: '#example-composer',
+    props: ['draft', 'cursor', 'disabled'],
+    emits: ['change', 'replace-draft'],
+    methods: {
+        insert() {
+            if (this.disabled) return;
+            this.$emit('change', { references: ['Sample Sneaker'] });
+            this.$emit('replace-draft', { start: this.cursor, end: this.cursor, text: '@Sample Sneaker' });
+        },
+    },
+});
+app.component('v-example-result', {
+    template: '#example-result',
+    props: ['descriptor', 'visible'],
+});
+</script>
+@endPushOnce
+```
