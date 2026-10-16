@@ -13,12 +13,37 @@ credential store, API endpoint or product-specific renderer is part of this chan
 
 | Question | Start here | Decision to check |
 | --- | --- | --- |
-| What can an installed package register? | [ExtensionRegistry](https://github.com/TheDesignFounder/unopim/blob/dec819a5a7ba7872aba2f3b202d0248a8fc32dad/packages/Webkul/AiAgent/src/Chat/ExtensionRegistry.php), [ResultRendererRegistry](https://github.com/TheDesignFounder/unopim/blob/dec819a5a7ba7872aba2f3b202d0248a8fc32dad/packages/Webkul/AiAgent/src/Chat/ResultRendererRegistry.php) | Registration comes from trusted server code, never a client-supplied view/component name. |
-| What crosses the HTTP boundary? | [ChatRequest](https://github.com/TheDesignFounder/unopim/blob/dec819a5a7ba7872aba2f3b202d0248a8fc32dad/packages/Webkul/AiAgent/src/Http/Requests/ChatRequest.php), [ChatContext](https://github.com/TheDesignFounder/unopim/blob/dec819a5a7ba7872aba2f3b202d0248a8fc32dad/packages/Webkul/AiAgent/src/Chat/ChatContext.php), [ChatController](https://github.com/TheDesignFounder/unopim/blob/dec819a5a7ba7872aba2f3b202d0248a8fc32dad/packages/Webkul/AiAgent/src/Http/Controllers/ChatController.php) | Identities and selections are validated; selections still need extension-specific authorization. |
-| How does a tool produce a card? | [ToolRegistry](https://github.com/TheDesignFounder/unopim/blob/dec819a5a7ba7872aba2f3b202d0248a8fc32dad/packages/Webkul/AiAgent/src/Chat/ToolRegistry.php), [AgentRunner](https://github.com/TheDesignFounder/unopim/blob/dec819a5a7ba7872aba2f3b202d0248a8fc32dad/packages/Webkul/AiAgent/src/Chat/AgentRunner.php) | Decorators follow authorization. A bounded descriptor selects a registered renderer. Preview-only results can report `mutated: false`. |
-| How do picker, keyboard and model controls interact? | [chat-widget.blade.php](https://github.com/TheDesignFounder/unopim/blob/dec819a5a7ba7872aba2f3b202d0248a8fc32dad/packages/Webkul/AiAgent/Resources/views/components/chat-widget.blade.php) | The native textarea keeps editing and IME. A picker may consume a key before Enter sends. Hiding one model does not remove its submitted value. |
-| Why do old saves not erase new messages? | [ConversationController](https://github.com/TheDesignFounder/unopim/blob/dec819a5a7ba7872aba2f3b202d0248a8fc32dad/packages/Webkul/AiAgent/src/Http/Controllers/ConversationController.php), [MessageDisplay](https://github.com/TheDesignFounder/unopim/blob/dec819a5a7ba7872aba2f3b202d0248a8fc32dad/packages/Webkul/AiAgent/src/Chat/MessageDisplay.php) | Saves merge by identity under a conversation lock. Missing messages do not mean deletion. |
-| How is existing data upgraded? | [Migrations](https://github.com/TheDesignFounder/unopim/blob/dec819a5a7ba7872aba2f3b202d0248a8fc32dad/packages/Webkul/AiAgent/Database/Migration) | Five additive migrations use nullable fields for old records; no provider enum or credential schema change. |
+| What can an installed package register? | [ExtensionRegistry](https://github.com/TheDesignFounder/unopim/blob/b406c71d04adbac8efd9ed02a0caea24a324f489/packages/Webkul/AiAgent/src/Chat/ExtensionRegistry.php), [ResultRendererRegistry](https://github.com/TheDesignFounder/unopim/blob/b406c71d04adbac8efd9ed02a0caea24a324f489/packages/Webkul/AiAgent/src/Chat/ResultRendererRegistry.php) | Registration comes from trusted server code, never a client-supplied view/component name. |
+| What crosses the HTTP boundary? | [ChatRequest](https://github.com/TheDesignFounder/unopim/blob/b406c71d04adbac8efd9ed02a0caea24a324f489/packages/Webkul/AiAgent/src/Http/Requests/ChatRequest.php), [ChatContext](https://github.com/TheDesignFounder/unopim/blob/b406c71d04adbac8efd9ed02a0caea24a324f489/packages/Webkul/AiAgent/src/Chat/ChatContext.php), [ChatController](https://github.com/TheDesignFounder/unopim/blob/b406c71d04adbac8efd9ed02a0caea24a324f489/packages/Webkul/AiAgent/src/Http/Controllers/ChatController.php) | Identities and selections are validated; selections still need extension-specific authorization. |
+| How does a tool produce a card? | [ToolRegistry](https://github.com/TheDesignFounder/unopim/blob/b406c71d04adbac8efd9ed02a0caea24a324f489/packages/Webkul/AiAgent/src/Chat/ToolRegistry.php), [AgentRunner](https://github.com/TheDesignFounder/unopim/blob/b406c71d04adbac8efd9ed02a0caea24a324f489/packages/Webkul/AiAgent/src/Chat/AgentRunner.php) | Decorators follow authorization. A bounded descriptor selects a registered renderer. Preview-only results can report `mutated: false`. |
+| How do picker, keyboard and model controls interact? | [chat-widget.blade.php](https://github.com/TheDesignFounder/unopim/blob/b406c71d04adbac8efd9ed02a0caea24a324f489/packages/Webkul/AiAgent/Resources/views/components/chat-widget.blade.php) | The native textarea keeps editing and IME. A picker may consume a key before Enter sends. Hiding one model does not remove its submitted value. |
+| Why do old saves not erase new messages? | [ConversationController](https://github.com/TheDesignFounder/unopim/blob/b406c71d04adbac8efd9ed02a0caea24a324f489/packages/Webkul/AiAgent/src/Http/Controllers/ConversationController.php), [MessageDisplay](https://github.com/TheDesignFounder/unopim/blob/b406c71d04adbac8efd9ed02a0caea24a324f489/packages/Webkul/AiAgent/src/Chat/MessageDisplay.php) | Saves merge by identity under a conversation lock. Missing messages do not mean deletion. |
+| How is existing data upgraded? | [Migrations](https://github.com/TheDesignFounder/unopim/blob/b406c71d04adbac8efd9ed02a0caea24a324f489/packages/Webkul/AiAgent/Database/Migration) | Five additive migrations use nullable fields for old records; no provider enum or credential schema change. |
+
+## Review stages and public contracts
+
+- **#770:** lazy extension-provider registration/resolution, trusted composer registration,
+  bounded extension selections, and authorized tool decoration. Provider display options are
+  registered here; the widget consumes them in #775.
+- **#775:** provider option enumeration, capability presentation overrides, result renderer
+  registration, and `COMPOSER_REFERENCES = 2`, together with their widget/stream consumers.
+- **#776:** `ChatContext::conversationId`, `requestId`, and `hasNewImages`, controller population
+  and request-ID validation, alongside optional saved history. Extensions using those fields
+  require the complete stack, even when database history is disabled.
+
+A provider resolver returns `MagicAIPlatform|null`. If a negative provider ID is unknown,
+removed, or resolves to null, the controller continues through the same active-default and
+first-active fallback used for missing native providers. It reports no platform only when
+neither the requested provider nor a fallback is available.
+
+Decorators receive `(Tool, ChatContext, metadata)` after ACL and context authorization.
+Each must return a `Tool`; an invalid result throws `UnexpectedValueException` immediately,
+before another decorator or the agent receives it. Registration order is preserved.
+
+Composer and capability keys start with a lowercase letter, contain only lowercase letters,
+digits, dots, underscores or hyphens, and are at most 64 characters. Capability presentation
+supports `description` and nullable `extension_event`. PHPDoc on each registry documents the
+provider options, registered component/view maps and inert descriptor shapes.
 
 ## Follow one request
 
@@ -156,10 +181,10 @@ application server, database or external provider:
 node --test packages/Webkul/AiAgent/tests/JavaScript/*.test.cjs
 ```
 
-The [harness notes](https://github.com/TheDesignFounder/unopim/blob/dec819a5a7ba7872aba2f3b202d0248a8fc32dad/packages/Webkul/AiAgent/tests/JavaScript/README.md) describe what is stubbed. Tests cover
+The [harness notes](https://github.com/TheDesignFounder/unopim/blob/b406c71d04adbac8efd9ed02a0caea24a324f489/packages/Webkul/AiAgent/tests/JavaScript/README.md) describe what is stubbed. Tests cover
 caret replacement and bounds, IME/key delegation, reference boundaries, escaping,
 model visibility and the actual submitted model/selection. The Pest bridge is
-[ComposerContractTest](https://github.com/TheDesignFounder/unopim/blob/dec819a5a7ba7872aba2f3b202d0248a8fc32dad/packages/Webkul/AiAgent/tests/Unit/ComposerContractTest.php).
+[ComposerContractTest](https://github.com/TheDesignFounder/unopim/blob/b406c71d04adbac8efd9ed02a0caea24a324f489/packages/Webkul/AiAgent/tests/Unit/ComposerContractTest.php).
 
 The Pest bridge skips when Node is unavailable; run the JavaScript command separately in a Node-enabled environment.
 
